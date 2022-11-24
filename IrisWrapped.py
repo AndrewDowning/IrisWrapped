@@ -1,11 +1,6 @@
 """
     A Quick experiment in wrapping the Iris Native interface in a more Pythonic style.
-    Example Usage:
-        with IrisConnection(ip=..., port=... etc) as con:
-            my_glob = IrisGlobal(con, "^MyGlob")
-            print(my_glob[1,2,3])
-            with con.transaction() as tran:
-                my_glob[1,2,3] = 42
+    See: iris_wrapped_test() for example usage.
 """
 import sys
 import time
@@ -88,24 +83,25 @@ class IrisTransaction(object):
 
     def __init__(self, iris, trans_depth):
         self.iris = iris
+        self._iris = iris.get_iris()
         self.trans_depth = trans_depth
 
     def __enter__(self):
         """Implements "with con.start_transaction as trans:" syntax."""
-        self.iris.iris.tStart()
+        self._iris.tStart()
         return self
 
     def __exit__(self, ex_type, ex_value, ex_traceback):
         """Decide how we're wrapping up the transaction"""
         self.iris.pop_transaction()
         if ex_type in (None, IrisTransaction.BreakingGood):
-            self.iris.iris.tCommit()
+            self._iris.tCommit()
             return True     # commit() called. Commit the transaction and suppress this exception.
         if ex_type is IrisTransaction.BreakingBad:
-            self.iris.iris.tRollbackOne()
+            self._iris.tRollbackOne()
             return True     # rollback_one() called. Rollback the transaction and suppress this exception.
         if ex_type is not IrisTransaction.BreakingReallyBad:
-            self.iris.iris.tRollbackOne()
+            self._iris.tRollbackOne()
             return False    # Unexpected exception: Rollback one level and throw exception to the keeper.
 
         # rollback_all() called. Full rollback already done.
@@ -120,14 +116,14 @@ class IrisTransaction(object):
         raise self.BreakingBad
 
     def rollback_all(self):
-        self.iris.iris.tRollback()
+        self._iris.tRollback()
         raise self.BreakingReallyBad
 
 
 class IrisGlobal(object):
     """
     IrisGlobal represents a single Iris Global of name 'global_name', accessed via a connection 'iris'
-        usage:  my_glob = IrisGlobal(iris, "^MyGlob")       # Prepare to use an Iris global named ^MyGlob. Equivalent to iris.MyGlob
+        usage:  my_glob = IrisGlobal(iris, "MyGlob")        # Prepare to use an Iris global named ^MyGlob. Equivalent to iris.MyGlob
                 my_glob.name()                              # -> "^MyGlob"
                 my_glob[None] = 42                          # set ^MyGlob = 42
                 x = my_glob[None]                           # set x = ^MyGlob           except x is in Python
@@ -151,10 +147,10 @@ class IrisGlobal(object):
                 my_glob.has_value((1,2,3))                  # $Data(^MyGlob(1,2,3)) = 1  or 11
     """
     def __init__(self, iris, global_name):
-        self.global_name = global_name
+        self.global_name = "^" + global_name
         if not iris.is_open():
             raise Exception("IRIS Connection not open")
-        self.iris = iris.iris
+        self._iris = iris.get_iris()
 
     def name(self):
         """The string name of this global."""
@@ -178,15 +174,15 @@ class IrisGlobal(object):
 
     def has_child(self, key=None):
         """Does global[subscript] have subordinate subscripts."""
-        return self.iris.isDefined(*self._key_params(key)) in (10, 11)
+        return self._iris.isDefined(*self._key_params(key)) in (10, 11)
 
     def has_value(self, key=None):
         """Does global[subscript] have a value"""
-        return self.iris.isDefined(*self._key_params(key)) in (1, 11)
+        return self._iris.isDefined(*self._key_params(key)) in (1, 11)
 
     def data(self, key=None):
         """Gets the $Data(global) value"""
-        return self.iris.isDefined(*self._key_params(key))
+        return self._iris.isDefined(*self._key_params(key))
 
     @staticmethod
     def data_has_child(data):
@@ -200,18 +196,18 @@ class IrisGlobal(object):
 
     def __getitem__(self, key=None):
         """Support for "value = my_global[subscripts]" syntax."""
-        return self.iris.get(*self._key_params(key))
+        return self._iris.get(*self._key_params(key))
 
     def __setitem__(self, key=None, value=None):
         """Support for "my_global[subscripts] = value" syntax."""
         try:
-            self.iris.set(*self._value_key_params(value, key))
+            self._iris.set(*self._value_key_params(value, key))
         except Exception as e:
             print(repr(e))
 
     def __delitem__(self, key=None):
         """Support for "del my_global[subscripts]" syntax."""
-        return self.iris.kill(*self._key_params(key))
+        return self._iris.kill(*self._key_params(key))
 
     def kill(self, key=None):
         """Kill my_global[subscripts]. Same effect as del my_global[subscripts]."""
@@ -219,20 +215,20 @@ class IrisGlobal(object):
 
     def increment(self, key=None, value=1):
         """my_global[subscripts] += value, as an atomic action."""
-        return self.iris.increment(*self._value_key_params(value, key))
+        return self._iris.increment(*self._value_key_params(value, key))
 
     def lock(self, key=None, lock_mode="", timeout=1):
         """ lock my_global[subscripts]
             lock_mode = "S"hared, "E"scalating or "SE",
             timeout is seconds
         """
-        self.iris.lock(lock_mode, timeout, *self._key_params(key))
+        self._iris.lock(lock_mode, timeout, *self._key_params(key))
 
     def unlock(self, key=None, lock_mode=""):
         """ Unlock my_global[subscripts]
             lock_mode="I"mmed, "D"efer, "S"hare, "E"scalate or "SE"
         """
-        self.iris.unlock(lock_mode, *self._key_params(key))
+        self._iris.unlock(lock_mode, *self._key_params(key))
 
     def __call__(self, *args):
         """Support for "value = my_global(subscripts)" syntax."""
@@ -250,18 +246,18 @@ class IrisGlobal(object):
 
     def iterkeys(self, key=None, reverse=False, start_from=None, int_key=False):
         """Iterate through keys at my_global(subscript), optionally after a value, or in reverse"""
-        key_iter = self.iris.iterator(*self._key_params(key)).subscripts().startFrom(start_from)
+        key_iter = self._iris.iterator(*self._key_params(key)).subscripts().startFrom(start_from)
         key_iter = key_iter.reversed() if reverse else key_iter
         return IrisGlobal.iterkeys_int_key(key_iter) if int_key else key_iter
 
     def itervalues(self, key=None, reverse=False, start_from=None):
         """Iterate through values at my_global(subscript), optionally after a value, or in reverse"""
-        value_iter = self.iris.iterator(*self._key_params(key)).values().startFrom(start_from)
+        value_iter = self._iris.iterator(*self._key_params(key)).values().startFrom(start_from)
         return value_iter.reversed() if reverse else value_iter
 
     def iteritems(self, key=None, reverse=False, start_from=None, int_key=False):
         """Iterate through (key,value) at my_global(subscript), optionally after a value, or in reverse"""
-        item_iter = self.iris.iterator(*self._key_params(key)).items().startFrom(start_from)
+        item_iter = self._iris.iterator(*self._key_params(key)).items().startFrom(start_from)
         item_iter = item_iter.reversed() if reverse else item_iter
         return IrisGlobal.iteritems_int_key(item_iter) if int_key else item_iter
 
@@ -271,7 +267,7 @@ class IrisGlobal(object):
         key = key if type(key) is tuple else tuple() if key is None else tuple(key)
         if self.has_value(key):
             yield key, self(*key)
-        iter_stack.append((key, self.iris.iterator(*self._key_params(key)).items()))
+        iter_stack.append((key, self._iris.iterator(*self._key_params(key)).items()))
         while iter_stack:
             try:
                 k, v = next(iter_stack[-1][1])
@@ -282,7 +278,7 @@ class IrisGlobal(object):
                 key = tuple((*iter_stack[-1][0], k))
                 yield key, v
                 if self.has_child(key):
-                    iter_stack.append((key, self.iris.iterator(*self._key_params(key)).items()))
+                    iter_stack.append((key, self._iris.iterator(*self._key_params(key)).items()))
             except StopIteration:
                 iter_stack.pop()
 
@@ -292,7 +288,7 @@ class Iris(object):
         Iris represents a connection to an Iris database
             usage:  try:
                         with Iris() as iris:
-                            my_glob = IrisGlobal(iris, "^MyGlob")    # or just iris.MyGlob
+                            my_glob = IrisGlobal(iris, "MyGlob")    # or just iris.MyGlob
                             # Do various DB operations.
                             with iris.transaction() as tran:
                                 my_glob[1,2,3] = 42
@@ -312,49 +308,47 @@ class Iris(object):
                  timeout=10000, shared_memory=True, logfile=""):
 
         # Initially, no transaction is started.
-        self.trans = deque()
+        self.__trans = deque()
 
         # Make connection to InterSystems IRIS database
-        self.iris_connection = irisnative.createConnection(hostname=ip, port=port, namespace=namespace,
-                                                           username=username, password=password,
-                                                           timeout=timeout, sharedmemory=shared_memory, logfile=logfile)
+        self.__iris_connection = irisnative.createConnection(hostname=ip, port=port, namespace=namespace,
+                                                             username=username, password=password,
+                                                             timeout=timeout, sharedmemory=shared_memory, logfile=logfile)
 
-        if self.iris_connection.isClosed():
-            self.iris_connection = None
-            self.iris = None
+        if self.__iris_connection.isClosed():
+            self.__iris_connection = None
+            self.__iris = None
             raise IrisConnectionException("irisnative.createConnection() - Failed to create open connection.")
 
         # Create an InterSystems IRIS native object
         try:
-            self.iris = irisnative.createIris(self.iris_connection)
+            self.__iris = irisnative.createIris(self.__iris_connection)
         except Exception as e:
-            self.iris_connection.close()
-            self.iris_connection = None
-            self.iris = None
+            self.__iris_connection.close()
+            self.__iris_connection = None
+            self.__iris = None
             raise IrisConnectionException(repr(e))
 
-    def __getattribute__(self, name) -> IrisGlobal:
-        """Implement iris.<globalname>"""
-        try:
-            attr = object.__getattribute__(self, name)
-        except AttributeError:
-            try:
-                # Make a new attribute for the global name.
-                object.__getattribute__(self, "iris")  # This will throw AttributeError if we're not constructed.
-                object.__setattr__(self, name, IrisGlobal(self, "^"+name))
-                attr = object.__getattribute__(self, name)
-            except AttributeError as _e:
-                raise
+    def __getattr__(self, name) -> IrisGlobal:
+        """Called when __getattribute__() already failed to find one."""
+        if name[0] == "_":
+            # print("__getattr__({}) returning object.__getattribute__(self, name)".format(name))
+            return object.__getattribute__(self, name)
+        # print("__getattr__({}) creating IrisGlobal".format(name))
+        object.__setattr__(self, name, IrisGlobal(self, name))
+        attr = object.__getattribute__(self, name)
         return attr
 
-    def __getitem__(self, name) -> IrisGlobal:
-        """Implement iris["<globalname>"]"""
+    def __setattr__(self, name, value):
+        if name[0] == "_":
+            object.__setattr__(self, name, value)
+            return
         try:
-            attr = object.__getattribute__(self, name)
+            iris_global = object.__getattribute__(self, name)
         except AttributeError:
-            object.__setattr__(self, name, IrisGlobal(self, "^"+name))
-            attr = object.__getattribute__(self, name)
-        return attr
+            iris_global = IrisGlobal(self, name)
+            object.__setattr__(self, name, iris_global)
+        iris_global.__setitem__(None, value)
 
     def __enter__(self):
         """__enter__() and __exit__() support "with Iris() as iris:" syntax."""
@@ -365,34 +359,37 @@ class Iris(object):
         self.unlock_all()
         self.close()
 
+    def get_iris(self):
+        return self.__iris
+
     def is_open(self):
         """Is the connection to Iris open and nowhere to go."""
-        return self.iris is not None and self.iris_connection is not None and not self.iris_connection.isClosed()
+        return self.__iris is not None and self.__iris_connection is not None and not self.__iris_connection.isClosed()
 
     def using_shared_memory(self):
         """Is the connection to Iris using shared memory?"""
-        return self.is_open() and self.iris_connection.isUsingSharedMemory()
+        return self.is_open() and self.__iris_connection.isUsingSharedMemory()
 
     def close(self):
         """We need better ways ti """
-        self.iris_connection.close()
+        self.__iris_connection.close()
 
     def unlock_all(self):
-        self.iris.releaseAllLocks()
+        self.__iris.releaseAllLocks()
 
     def transaction(self):
-        trans = IrisTransaction(self, len(self.trans))
-        self.trans.append(trans)
+        trans = IrisTransaction(self, len(self.__trans))
+        self.__trans.append(trans)
         return trans
 
     def pop_transaction(self):
-        self.trans.pop()
+        self.__trans.pop()
 
 
-def blah_iris_simple():
+def iris_wrapped_simple_test():
     parser = argparse.ArgumentParser(description="Simple Test IrisWrapped.")
     parser.add_argument("-i", "--ip", help="IP Address", type=str, default="127.0.0.1")
-    parser.add_argument("-p", "--port", help="IP Port", type=int, default=51791)
+    parser.add_argument("-p", "--port", help="IP Port", type=int, default=51794)
     parser.add_argument("-n", "--namespace", help="Namespace", type=str, default="User")
     parser.add_argument("-u", "--username", help="User Name", type=str, default="_SYSTEM")
     parser.add_argument("-w", "--password", help="Password", type=str, default="SYS")
@@ -412,22 +409,28 @@ def blah_iris_simple():
         print(repr(e))
 
 
-def blah_iris_wrapped():
+def iris_wrapped_test():
     parser = argparse.ArgumentParser(description="Testing IrisWrapped.")
     parser.add_argument("-i", "--ip", help="Iris IP Address", type=str, default="127.0.0.1")
-    parser.add_argument("-p", "--port", help="Iris IP Port", type=int, default=51795)
+    parser.add_argument("-p", "--port", help="Iris IP Port", type=int, default=51794)
     parser.add_argument("-n", "--namespace", help="Iris Namespace", type=str, default="USER")
     parser.add_argument("-u", "--username", help="Iris User Name", type=str, default="_SYSTEM")
     parser.add_argument("-w", "--password", help="Iris Password", type=str, default="SYS")
     args = parser.parse_args()
     try:
         with Iris(ip=args.ip, port=args.port, namespace=args.namespace, username=args.username, password=args.password) as iris:
-
             print("iris.using_shared_memory() =", iris.using_shared_memory())
 
-            iris.MyGlob[None] = 4242
+            # Create some Iris globals.
+            iris.MyGlob[None] = 4242        # Creates an Iris global ^MyGlob with a null subscript value of 4242
+            iris.StandAloneGlobal = 123     # Equivalent to iris.StandAloneGlobal[None] = 123
 
-            print("\nSetting Globals:")
+            # You can also just make a Python variable unattached from the iris class that represents an Iris global just the same.
+            unattached_global = IrisGlobal(iris, "unattachedglobal")  # Note you can't have _'s in Iris global names.
+            unattached_global[None] = 1
+            unattached_global[1, 2] = 3
+
+            print("\nSetting Globals with Subscripts:")
             global_set = ((1,         42),
                           (42,        1000),
                           ((1, 2, 2), "String"),
@@ -444,7 +447,10 @@ def blah_iris_wrapped():
             global_del = ((1, 2, 7), )
             for key in global_del:
                 del iris.MyGlob[key]
-                print("    {}({})".format(iris.MyGlob.name(), key))
+                if iris.MyGlob.has_value(key):
+                    print("    {}({}) - failed to delete.".format(iris.MyGlob.name(), key))
+                else:
+                    print("    {}({}) - Deleted successfully.".format(iris.MyGlob.name(), key))
 
             print("\nChecking Globals Values and Node Status")
             for sub, val in global_set:
@@ -661,5 +667,5 @@ def blah_iris_wrapped():
 
 # Start event loop.
 if __name__ == '__main__':
-    blah_iris_wrapped()
-    # blah_iris_simple()
+    iris_wrapped_test()
+    # iris_wrapped_simple_test()
